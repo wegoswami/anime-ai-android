@@ -1,0 +1,73 @@
+name: Build Android APK (from zip)
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ["*.zip"]
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack the zip
+        run: |
+          zip=$(ls -t *.zip 2>/dev/null | head -n1)
+          if [ -z "$zip" ]; then echo "No .zip file in the repo root"; ls -la; exit 1; fi
+          echo "Using $zip"
+          mkdir _unz && unzip -q "$zip" -d _unz
+          gradle_file=$(find _unz -path '*android/app/build.gradle' | head -n1)
+          if [ -z "$gradle_file" ]; then echo "android/app/build.gradle not found in zip"; find _unz -maxdepth 3 | head -40; exit 1; fi
+          proj=$(dirname "$(dirname "$(dirname "$gradle_file")")")
+          echo "PROJ=$proj" >> "$GITHUB_ENV"
+          ls "$proj"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK pieces
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" > /dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Put the web app inside the APK
+        run: |
+          rm -rf "$PROJ/android/app/src/main/assets/www"
+          mkdir -p "$PROJ/android/app/src/main/assets"
+          cp -r "$PROJ/mobile" "$PROJ/android/app/src/main/assets/www"
+          rm -f "$PROJ/android/app/src/main/assets/www/README.md"
+          VER=$(grep -oE 'APP_VERSION = "[0-9.]+"' "$PROJ/mobile/app.js" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "{\"repo\":\"${{ github.repository }}\",\"version\":\"$VER\"}" > "$PROJ/android/app/src/main/assets/www/buildinfo.json"
+          cat "$PROJ/android/app/src/main/assets/www/buildinfo.json"
+
+      - name: Build the APK
+        run: cd "$PROJ/android" && gradle --no-daemon assembleRelease -PappVersion="$VER"
+
+      - name: Collect the APK
+        run: |
+          mkdir -p out
+          cp "$PROJ/android/app/build/outputs/apk/release/app-release.apk" "out/AnimeBuddy-$VER.apk"
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AnimeBuddy-apk
+          path: out/*.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VER }}
+          name: Anime Buddy ${{ env.VER }} (Android)
+          make_latest: true
+          files: out/*.apk
